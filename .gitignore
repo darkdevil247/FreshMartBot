@@ -9,3 +9,4 @@ venv/
 *.csv
 .env
 .DS_Store
+*.log
