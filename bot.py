@@ -1037,10 +1037,13 @@ def handle_callback_query(chat_id, callback_data):
             
         elif callback_data.startswith('newitem_cat_'):
             category = callback_data[12:]
-            user_sessions[chat_id] = {
+            # Store the category in session with proper error handling
+            if chat_id not in user_sessions:
+                user_sessions[chat_id] = {}
+            user_sessions[chat_id].update({
                 'step': 'awaiting_new_item_name',
                 'new_item_category': category
-            }
+            })
             send_message(chat_id, f"📋 Category: {category}\n\nPlease enter the new item name:")
             
         elif callback_data.startswith('remove_cat_'):
@@ -1102,7 +1105,7 @@ def handle_download_request(chat_id, callback_data):
         logger.error(f"❌ Download error: {e}")
         send_message(chat_id, "❌ Error generating download files")
 
-# ==================== COMPLETE MESSAGE HANDLER ====================
+# ==================== FIXED MESSAGE HANDLER ====================
 def handle_message(chat_id, text):
     try:
         logger.info(f"📩 Processing message: {text}")
@@ -1249,26 +1252,38 @@ def handle_message(chat_id, text):
                 send_message(chat_id, "❌ Error updating price. Please try again.")
                 show_admin_panel(chat_id)
                 
+        # FIXED: Add New Item session handling with proper session management
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_name':
             item_name = text
-            user_sessions[chat_id] = {
+            # Ensure session exists and update it properly
+            if chat_id not in user_sessions:
+                user_sessions[chat_id] = {}
+            user_sessions[chat_id].update({
                 'step': 'awaiting_new_item_price',
                 'new_item_name': item_name
-            }
+            })
             send_message(chat_id, f"📦 Item Name: {item_name}\n\nPlease enter the price (e.g., 12.99):")
             
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_price':
             try:
                 item_price = float(text)
                 session_data = user_sessions[chat_id]
+                # Check if required session data exists
+                if 'new_item_name' not in session_data or 'new_item_category' not in session_data:
+                    logger.error(f"❌ Missing session data: {session_data}")
+                    send_message(chat_id, "❌ Session expired. Please start over.")
+                    show_admin_panel(chat_id)
+                    return
+                    
                 item_name = session_data['new_item_name']
                 category = session_data['new_item_category']
-                user_sessions[chat_id] = {
+                # Update session properly
+                user_sessions[chat_id].update({
                     'step': 'awaiting_new_item_unit',
                     'new_item_name': item_name,
                     'new_item_price': item_price,
                     'new_item_category': category
-                }
+                })
                 send_message(chat_id, 
                     f"📦 Item: {item_name}\n"
                     f"💰 Price: ${item_price}\n\n"
@@ -1278,6 +1293,7 @@ def handle_message(chat_id, text):
                 send_message(chat_id, "❌ Please enter a valid price number")
             except Exception as e:
                 logger.error(f"❌ Error setting price: {e}")
+                logger.error(f"❌ Session data: {user_sessions.get(chat_id, {})}")
                 send_message(chat_id, "❌ Error setting price. Please try again.")
                 show_admin_panel(chat_id)
                 
@@ -1285,10 +1301,19 @@ def handle_message(chat_id, text):
             try:
                 unit = text
                 session_data = user_sessions[chat_id]
+                # Check if all required session data exists
+                required_fields = ['new_item_name', 'new_item_price', 'new_item_category']
+                if not all(field in session_data for field in required_fields):
+                    logger.error(f"❌ Missing session data: {session_data}")
+                    send_message(chat_id, "❌ Session expired. Please start over.")
+                    show_admin_panel(chat_id)
+                    return
+                    
                 item_name = session_data['new_item_name']
                 item_price = session_data['new_item_price']
                 category = session_data['new_item_category']
                 
+                # Add the new item to the category
                 if category not in grocery_categories:
                     grocery_categories[category] = {}
                 
@@ -1297,6 +1322,7 @@ def handle_message(chat_id, text):
                     'unit': unit
                 }
                 
+                # Save to CSV
                 save_prices_to_csv()
                 
                 send_message(chat_id,
@@ -1309,6 +1335,7 @@ def handle_message(chat_id, text):
             except Exception as e:
                 logger.error(f"❌ Error adding new item: {e}")
                 logger.error(traceback.format_exc())
+                logger.error(f"❌ Session data: {user_sessions.get(chat_id, {})}")
                 send_message(chat_id, "❌ Error adding new item. Please try again.")
                 show_admin_panel(chat_id)
                 
