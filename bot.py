@@ -312,4 +312,6 @@ def send_main_menu(chat_id):
 # ==================== RUN FLASK ====================
 if __name__ == "__main__":
     logger.info("🚀 FreshMart Bot started with Flask webhook!")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
