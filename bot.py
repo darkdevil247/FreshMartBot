@@ -93,7 +93,7 @@ def load_prices_from_csv():
         if os.path.exists(PRICES_CSV):
             with open(PRICES_CSV, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
-                grocery_categories = {}
+                loaded_categories = {}
                 
                 for row in reader:
                     category = row['Category']
@@ -101,18 +101,23 @@ def load_prices_from_csv():
                     price = float(row['Price'])
                     unit = row['Unit']
                     
-                    if category not in grocery_categories:
-                        grocery_categories[category] = {}
+                    if category not in loaded_categories:
+                        loaded_categories[category] = {}
                     
-                    grocery_categories[category][item_name] = {
+                    loaded_categories[category][item_name] = {
                         'price': price,
                         'unit': unit
                     }
+                
+                # Only update if we successfully loaded data
+                if loaded_categories:
+                    grocery_categories = loaded_caterials
             
             logger.info("✅ Prices loaded from CSV successfully!")
             return True
     except Exception as e:
         logger.error(f"❌ Failed to load prices from CSV: {e}")
+        # Keep existing categories if loading fails
     return False
 
 def save_prices_to_csv():
@@ -353,108 +358,6 @@ def get_csv_file(file_type):
         logger.error(f"❌ Failed to read CSV file: {e}")
         return None
 
-# ==================== ADMIN ORDER MANAGEMENT ====================
-def send_admin_order_notification(order_id, order_data):
-    """Send new order notification to admin with action buttons"""
-    if not ADMIN_CHAT_ID:
-        return
-        
-    order_summary = create_admin_order_summary(order_id, order_data)
-    
-    admin_message = f"""🆕 NEW ORDER #{order_id}
-
-{order_summary}
-
-⏰ Order Time: {order_data['created_at']}
-📊 Status: {order_data['status']}
-
-Choose action:"""
-    
-    inline_keyboard = [
-        [
-            {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
-            {'text': '❌ Cancel Order', 'callback_data': f'cancel_{order_id}'}
-        ],
-        [
-            {'text': '✅ Mark Delivered', 'callback_data': f'deliver_{order_id}'},
-            {'text': '📋 View Details', 'callback_data': f'details_{order_id}'}
-        ]
-    ]
-    
-    send_message(ADMIN_CHAT_ID, admin_message, inline_keyboard=inline_keyboard)
-
-def create_admin_order_summary(order_id, order_data):
-    """Create order summary for admin"""
-    cart = order_data['cart']
-    items_text = ""
-    for item_name, details in cart.items():
-        items_text += f"• {item_name} - {details['quantity']} {details['unit']}\n"
-    
-    summary = f"""👤 Customer: {order_data['customer_name']}
-📞 Phone: {order_data['phone']}
-📍 Address: {order_data['address']}
-
-📦 Order Items:
-{items_text}
-💰 Total: ${order_data['total']:.2f}"""
-    
-    return summary
-
-def handle_admin_callback(chat_id, callback_data):
-    """Handle admin action callbacks"""
-    if not is_admin(chat_id):
-        send_message(chat_id, "❌ Unauthorized access.")
-        return
-    
-    try:
-        if callback_data.startswith('ship_'):
-            order_id = callback_data[5:]
-            if update_order_status(order_id, 'Shipped', 'Your order is on the way!'):
-                send_message(chat_id, f"✅ Order #{order_id} marked as shipped! Customer notified.")
-            else:
-                send_message(chat_id, f"❌ Order #{order_id} not found.")
-                
-        elif callback_data.startswith('cancel_'):
-            order_id = callback_data[7:]
-            user_sessions[chat_id] = {
-                'step': 'awaiting_cancel_reason',
-                'order_id': order_id
-            }
-            send_message(chat_id, f"📝 Please provide reason for cancelling order #{order_id}:")
-            
-        elif callback_data.startswith('deliver_'):
-            order_id = callback_data[8:]
-            if update_order_status(order_id, 'Delivered'):
-                send_message(chat_id, f"✅ Order #{order_id} marked as delivered! Customer notified.")
-            else:
-                send_message(chat_id, f"❌ Order #{order_id} not found.")
-                
-        elif callback_data.startswith('details_'):
-            order_id = callback_data[8:]
-            order = order_tracking.get(order_id)
-            if order:
-                details = f"""📋 Order Details #{order_id}
-
-Customer: {order['customer_name']}
-Phone: {order['phone']}
-Address: {order['address']}
-Status: {order['status']}
-Total: ${order['total']:.2f}
-Created: {order['created_at']}
-Updated: {order['updated_at']}
-
-Items:"""
-                for item_name, details in order['cart'].items():
-                    details += f"\n• {item_name} - {order['cart'][item_name]['quantity']} {order['cart'][item_name]['unit']}"
-                
-                send_message(chat_id, details)
-            else:
-                send_message(chat_id, f"❌ Order #{order_id} not found.")
-                
-    except Exception as e:
-        logger.error(f"❌ Admin callback error: {e}")
-        send_message(chat_id, "❌ Error processing admin action.")
-
 # ==================== ADMIN PRICE & INVENTORY MANAGEMENT ====================
 def is_admin(chat_id):
     """Check if user is admin"""
@@ -550,6 +453,79 @@ def handle_admin_new_item(chat_id):
     
     send_message(chat_id, categories_text, inline_keyboard=inline_keyboard)
 
+def handle_admin_remove_item(chat_id):
+    """Start process to remove item"""
+    if not is_admin(chat_id):
+        return
+    
+    user_sessions[chat_id] = {'step': 'awaiting_remove_item_category'}
+    
+    categories_text = "🗑️ Select category to remove item from:"
+    inline_keyboard = []
+    
+    for category in grocery_categories.keys():
+        inline_keyboard.append([{
+            'text': category,
+            'callback_data': f"remove_cat_{category}"
+        }])
+    
+    inline_keyboard.append([{'text': '❌ Cancel', 'callback_data': 'admin_cancel'}])
+    
+    send_message(chat_id, categories_text, inline_keyboard=inline_keyboard)
+
+def show_remove_items_from_category(chat_id, category):
+    """Show items to remove from a category"""
+    if category not in grocery_categories:
+        send_message(chat_id, "❌ Category not found!")
+        return
+    
+    items = grocery_categories[category]
+    if not items:
+        send_message(chat_id, f"❌ No items in {category} to remove!")
+        return
+    
+    items_text = f"🗑️ Remove Item from {category}\n\nSelect item to remove:"
+    inline_keyboard = []
+    
+    for item_name in items.keys():
+        inline_keyboard.append([{
+            'text': f"❌ {item_name}",
+            'callback_data': f"remove_item_{item_name}"
+        }])
+    
+    inline_keyboard.append([{'text': '🔙 Back', 'callback_data': 'admin_back'}])
+    
+    send_message(chat_id, items_text, inline_keyboard=inline_keyboard)
+
+def remove_item_from_category(chat_id, item_name):
+    """Remove item from category"""
+    try:
+        item_found = False
+        category_to_remove_from = None
+        
+        for category, items in grocery_categories.items():
+            if item_name in items:
+                item_found = True
+                category_to_remove_from = category
+                break
+        
+        if item_found and category_to_remove_from:
+            # Remove the item
+            del grocery_categories[category_to_remove_from][item_name]
+            
+            # Save changes to CSV
+            save_prices_to_csv()
+            
+            send_message(chat_id, f"✅ Successfully removed: {item_name} from {category_to_remove_from}")
+            show_admin_panel(chat_id)
+        else:
+            send_message(chat_id, "❌ Item not found!")
+            
+    except Exception as e:
+        logger.error(f"❌ Error removing item: {e}")
+        send_message(chat_id, "❌ Error removing item. Please try again.")
+        show_admin_panel(chat_id)
+
 def show_all_items_admin(chat_id):
     """Show all items with prices to admin"""
     items_text = "📊 **CURRENT INVENTORY & PRICING**\n\n"
@@ -585,6 +561,7 @@ def show_all_orders_admin(chat_id):
     """Show all orders to admin"""
     if not order_tracking:
         send_message(chat_id, "📦 No orders yet!")
+        show_admin_panel(chat_id)
         return
     
     orders_text = "📦 **ALL ORDERS**\n\n"
@@ -755,6 +732,7 @@ We're preparing your fresh groceries! 🥦"""
             
     except Exception as e:
         logger.error(f"❌ Critical error in COD order: {e}")
+        logger.error(traceback.format_exc())
         send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again.")
         return False
 
@@ -933,29 +911,40 @@ def get_updates(offset=None):
         return None
 
 def handle_callback_query(chat_id, callback_data):
-    if callback_data.startswith('add_'):
-        item_name = callback_data[4:]
-        handle_add_to_cart(chat_id, item_name)
-    elif callback_data == 'back_categories':
-        show_categories(chat_id)
-    elif callback_data == 'view_cart':
-        show_cart(chat_id)
-    elif callback_data.startswith(('ship_', 'cancel_', 'deliver_', 'details_')):
-        handle_admin_callback(chat_id, callback_data)
-    elif callback_data.startswith('update_price_'):
-        item_name = callback_data[13:]
-        handle_admin_price_update(chat_id, item_name)
-    elif callback_data.startswith('newitem_cat_'):
-        category = callback_data[12:]
-        user_sessions[chat_id] = {
-            'step': 'awaiting_new_item_name',
-            'new_item_category': category
-        }
-        send_message(chat_id, f"📋 Category: {category}\n\nPlease enter the new item name:")
-    elif callback_data == 'admin_back' or callback_data == 'admin_cancel':
-        show_admin_panel(chat_id)
-    elif callback_data.startswith('download_'):
-        handle_download_request(chat_id, callback_data)
+    try:
+        if callback_data.startswith('add_'):
+            item_name = callback_data[4:]
+            handle_add_to_cart(chat_id, item_name)
+        elif callback_data == 'back_categories':
+            show_categories(chat_id)
+        elif callback_data == 'view_cart':
+            show_cart(chat_id)
+        elif callback_data.startswith(('ship_', 'cancel_', 'deliver_', 'details_')):
+            handle_admin_callback(chat_id, callback_data)
+        elif callback_data.startswith('update_price_'):
+            item_name = callback_data[13:]
+            handle_admin_price_update(chat_id, item_name)
+        elif callback_data.startswith('newitem_cat_'):
+            category = callback_data[12:]
+            user_sessions[chat_id] = {
+                'step': 'awaiting_new_item_name',
+                'new_item_category': category
+            }
+            send_message(chat_id, f"📋 Category: {category}\n\nPlease enter the new item name:")
+        elif callback_data.startswith('remove_cat_'):
+            category = callback_data[11:]
+            show_remove_items_from_category(chat_id, category)
+        elif callback_data.startswith('remove_item_'):
+            item_name = callback_data[12:]
+            remove_item_from_category(chat_id, item_name)
+        elif callback_data == 'admin_back' or callback_data == 'admin_cancel':
+            show_admin_panel(chat_id)
+        elif callback_data.startswith('download_'):
+            handle_download_request(chat_id, callback_data)
+    except Exception as e:
+        logger.error(f"❌ Callback query error: {e}")
+        logger.error(traceback.format_exc())
+        send_message(chat_id, "❌ Sorry, an error occurred. Please try again.")
 
 def handle_download_request(chat_id, callback_data):
     """Handle CSV download requests"""
@@ -1047,6 +1036,8 @@ def handle_message(chat_id, text):
             show_items_for_price_update(chat_id)
         elif text == '🆕 Add New Item' and is_admin(chat_id):
             handle_admin_new_item(chat_id)
+        elif text == '🗑️ Remove Item' and is_admin(chat_id):
+            handle_admin_remove_item(chat_id)
         elif text == '📦 View Orders' and is_admin(chat_id):
             show_all_orders_admin(chat_id)
         elif text == '📥 Download Data' and is_admin(chat_id):
@@ -1104,6 +1095,10 @@ def handle_message(chat_id, text):
                 show_admin_panel(chat_id)
             except ValueError:
                 send_message(chat_id, "❌ Please enter a valid number (e.g., 12.99)")
+            except Exception as e:
+                logger.error(f"❌ Error updating price: {e}")
+                send_message(chat_id, "❌ Error updating price. Please try again.")
+                show_admin_panel(chat_id)
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_name':
             item_name = text
             user_sessions[chat_id] = {
@@ -1130,26 +1125,40 @@ def handle_message(chat_id, text):
                 )
             except ValueError:
                 send_message(chat_id, "❌ Please enter a valid price number")
+            except Exception as e:
+                logger.error(f"❌ Error setting price: {e}")
+                send_message(chat_id, "❌ Error setting price. Please try again.")
+                show_admin_panel(chat_id)
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_unit':
-            unit = text
-            session_data = user_sessions[chat_id]
-            item_name = session_data['new_item_name']
-            item_price = session_data['new_item_price']
-            category = session_data['new_item_category']
-            if category not in grocery_categories:
-                grocery_categories[category] = {}
-            grocery_categories[category][item_name] = {
-                'price': item_price,
-                'unit': unit
-            }
-            save_prices_to_csv()
-            send_message(chat_id,
-                f"✅ New Item Added!\n\n"
-                f"📦 {item_name}\n"
-                f"💰 ${item_price}/{unit}\n"
-                f"📋 Category: {category}"
-            )
-            show_admin_panel(chat_id)
+            try:
+                unit = text
+                session_data = user_sessions[chat_id]
+                item_name = session_data['new_item_name']
+                item_price = session_data['new_item_price']
+                category = session_data['new_item_category']
+                
+                if category not in grocery_categories:
+                    grocery_categories[category] = {}
+                
+                grocery_categories[category][item_name] = {
+                    'price': item_price,
+                    'unit': unit
+                }
+                
+                save_prices_to_csv()
+                
+                send_message(chat_id,
+                    f"✅ New Item Added!\n\n"
+                    f"📦 {item_name}\n"
+                    f"💰 ${item_price}/{unit}\n"
+                    f"📋 Category: {category}"
+                )
+                show_admin_panel(chat_id)
+            except Exception as e:
+                logger.error(f"❌ Error adding new item: {e}")
+                logger.error(traceback.format_exc())
+                send_message(chat_id, "❌ Error adding new item. Please try again.")
+                show_admin_panel(chat_id)
         elif text == '📞 Contact Store':
             send_message(chat_id, "📞 FreshMart Contact Info:\n\n🏪 Store: FreshMart Grocery\n📞 Phone: 555-1234\n📍 Address: 123 Main Street\n⏰ Hours: 7 AM - 10 PM Daily")
         elif text == 'ℹ️ Store Info':
@@ -1171,6 +1180,7 @@ def handle_message(chat_id, text):
 
     except Exception as e:
         logger.error(f"❌ Error handling message: {e}")
+        logger.error(traceback.format_exc())
         send_message(chat_id, "❌ Sorry, an error occurred. Please try again.")
         handle_start(chat_id)
 
@@ -1226,6 +1236,7 @@ def main():
         except Exception as e:
             error_count += 1
             logger.error(f"❌ Main loop error #{error_count}: {e}")
+            logger.error(traceback.format_exc())
             
             if error_count > max_errors:
                 logger.error("🔄 Too many consecutive errors, waiting 60 seconds before continuing...")
