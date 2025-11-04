@@ -1,5 +1,1 @@
 requests==2.31.0
-python-telegram-bot==20.7
-gspread==5.11.0
-google-auth==2.23.0
-python-dotenv==1.0.0
