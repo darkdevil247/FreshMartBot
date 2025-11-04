@@ -371,39 +371,55 @@ def send_admin_order_notification(order_id, order_data):
 {order_summary}
 
 ⏰ Order Time: {order_data['created_at']}
-📊 Status: {order_data['status']}
+📊 Status: {order_data['status']}"""
 
-Choose action:"""
-    
-    inline_keyboard = [
-        [
-            {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
-            {'text': '❌ Cancel Order', 'callback_data': f'cancel_{order_id}'}
-        ],
-        [
-            {'text': '✅ Mark Delivered', 'callback_data': f'deliver_{order_id}'},
-            {'text': '📋 View Details', 'callback_data': f'details_{order_id}'}
+    # Only show action buttons if order is not delivered or cancelled
+    if order_data['status'] in ['Pending', 'Shipped']:
+        admin_message += "\n\nChoose action:"
+        inline_keyboard = [
+            [
+                {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
+                {'text': '❌ Cancel Order', 'callback_data': f'cancel_{order_id}'}
+            ],
+            [
+                {'text': '✅ Mark Delivered', 'callback_data': f'deliver_{order_id}'},
+                {'text': '📋 View Details', 'callback_data': f'details_{order_id}'}
+            ]
         ]
-    ]
+    else:
+        # Order is delivered or cancelled - show status only
+        status_emoji = '✅' if order_data['status'] == 'Delivered' else '❌'
+        admin_message += f"\n\n{status_emoji} Order {order_data['status'].lower()} - No actions available"
+        inline_keyboard = [
+            [{'text': '📋 View Details', 'callback_data': f'details_{order_id}'}]
+        ]
     
     send_message(ADMIN_CHAT_ID, admin_message, inline_keyboard=inline_keyboard)
 
-def create_admin_order_summary(order_id, order_data):
-    """Create order summary for admin"""
-    cart = order_data['cart']
-    items_text = ""
-    for item_name, details in cart.items():
-        items_text += f"• {item_name} - {details['quantity']} {details['unit']}\n"
+def update_order_status(order_id, new_status, admin_note=""):
+    """Update order status and notify customer"""
+    if order_id not in order_tracking:
+        return False
     
-    summary = f"""👤 Customer: {order_data['customer_name']}
-📞 Phone: {order_data['phone']}
-📍 Address: {order_data['address']}
-
-📦 Order Items:
-{items_text}
-💰 Total: ${order_data['total']:.2f}"""
+    order = order_tracking[order_id]
+    old_status = order['status']
+    order['status'] = new_status
+    order['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    return summary
+    # Update CSV file
+    update_order_in_csv(order_id, 'Status', new_status)
+    
+    # Notify customer
+    notify_customer_order_update(order_id, new_status, admin_note)
+    
+    # Send updated notification to admin
+    try:
+        send_admin_order_notification(order_id, order)
+    except Exception as e:
+        logger.warning(f"⚠️ Admin notification update failed: {e}")
+    
+    logger.info(f"✅ Order {order_id} status updated: {old_status} → {new_status}")
+    return True
 
 def handle_admin_callback(chat_id, callback_data):
     """Handle admin action callbacks"""
@@ -439,21 +455,44 @@ def handle_admin_callback(chat_id, callback_data):
             order_id = callback_data[8:]
             order = order_tracking.get(order_id)
             if order:
+                status_emoji = {
+                    'Pending': '⏳',
+                    'Shipped': '🚚',
+                    'Delivered': '✅',
+                    'Cancelled': '❌'
+                }.get(order['status'], '📦')
+                
                 details = f"""📋 Order Details #{order_id}
 
-Customer: {order['customer_name']}
-Phone: {order['phone']}
-Address: {order['address']}
-Status: {order['status']}
-Total: ${order['total']:.2f}
-Created: {order['created_at']}
-Updated: {order['updated_at']}
+{status_emoji} Status: {order['status']}
+👤 Customer: {order['customer_name']}
+📞 Phone: {order['phone']}
+📍 Address: {order['address']}
+💰 Total: ${order['total']:.2f}
+🕐 Created: {order['created_at']}
+🔄 Updated: {order['updated_at']}
 
-Items:"""
-                for item_name, details in order['cart'].items():
-                    details += f"\n• {item_name} - {order['cart'][item_name]['quantity']} {order['cart'][item_name]['unit']}"
+📦 Order Items:"""
+                for item_name, item_details in order['cart'].items():
+                    details += f"\n• {item_name} - {item_details['quantity']} {item_details['unit']}"
                 
-                send_message(chat_id, details)
+                # Show available actions based on current status
+                if order['status'] in ['Pending', 'Shipped']:
+                    details += "\n\nAvailable Actions:"
+                    inline_keyboard = []
+                    if order['status'] == 'Pending':
+                        inline_keyboard.append([
+                            {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
+                            {'text': '❌ Cancel Order', 'callback_data': f'cancel_{order_id}'}
+                        ])
+                    inline_keyboard.append([
+                        {'text': '✅ Mark Delivered', 'callback_data': f'deliver_{order_id}'}
+                    ])
+                    send_message(chat_id, details, inline_keyboard=inline_keyboard)
+                else:
+                    # Order is completed (delivered or cancelled)
+                    details += f"\n\n📝 Order {order['status'].lower()} - No further actions available"
+                    send_message(chat_id, details)
             else:
                 send_message(chat_id, f"❌ Order #{order_id} not found.")
                 
