@@ -6,22 +6,31 @@ from datetime import datetime
 import logging
 import traceback
 import csv
-import io
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
-# ==================== SAFE CONFIGURATION ====================
-print("🛒 Starting FreshMart Grocery Delivery Bot...")
+# ==================== CONFIGURATION ====================
+print("🚀 Starting FreshMart Grocery Delivery Bot on Railway...")
 
-# Get credentials from environment (SAFE)
+# Get credentials from environment (Railway Environment Variables)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
+PORT = int(os.environ.get('PORT', 8000))
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Check if environment variables are set
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN environment variable not set!")
+    logger.error("💡 Set it in Railway → Variables tab")
     exit(1)
 
 if not ADMIN_CHAT_ID:
@@ -104,7 +113,6 @@ def load_prices_from_csv():
             return True
     except Exception as e:
         logger.error(f"❌ Failed to load prices from CSV: {e}")
-        # Keep default prices if loading fails
     return False
 
 def save_prices_to_csv():
@@ -136,7 +144,31 @@ load_prices_from_csv()
 user_carts = {}
 user_sessions = {}
 order_tracking = {}
-last_update_id = 0  # Global variable to track updates
+last_update_id = 0
+
+# ==================== HEALTH CHECK ENDPOINT ====================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'FreshMart Bot is running!')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        logger.info("🩺 Health check from %s", self.address_string())
+
+def start_health_check_server():
+    """Start a simple HTTP server for health checks"""
+    try:
+        server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+        logger.info(f"🩺 Health check server running on port {PORT}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"❌ Health check server failed: {e}")
 
 # ==================== ORDER TRACKING SYSTEM ====================
 def generate_order_id():
@@ -150,7 +182,7 @@ def save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, 
         'customer_name': customer_name,
         'phone': phone,
         'address': address,
-        'cart': cart.copy(),  # Create a copy to avoid reference issues
+        'cart': cart.copy(),
         'total': total,
         'status': status,
         'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -248,21 +280,21 @@ def save_order_to_csv(chat_id, customer_name, phone, address, cart, special_inst
 
         # Prepare order data
         order_data = [
-            order_id,                                      # Order ID
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Order Date
-            str(chat_id),                                  # Chat ID
-            customer_name,                                 # Customer Name
-            phone,                                         # Phone
-            address,                                       # Address
-            ", ".join(items_list),                         # Items
-            ", ".join(quantities_list),                    # Quantities
-            f"{subtotal:.2f}",                            # Subtotal
-            f"{delivery_fee:.2f}",                        # Delivery Fee
-            f"{total:.2f}",                               # Total
-            "Pending",                                     # Status
-            special_instructions,                         # Special Instructions
-            "Cash on Delivery",                           # Payment Method
-            "Telegram Bot"                               # Source
+            order_id,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            str(chat_id),
+            customer_name,
+            phone,
+            address,
+            ", ".join(items_list),
+            ", ".join(quantities_list),
+            f"{subtotal:.2f}",
+            f"{delivery_fee:.2f}",
+            f"{total:.2f}",
+            "Pending",
+            special_instructions,
+            "Cash on Delivery",
+            "Telegram Bot"
         ]
 
         # Append to CSV
@@ -275,7 +307,6 @@ def save_order_to_csv(chat_id, customer_name, phone, address, cart, special_inst
         
     except Exception as e:
         logger.error(f"❌ CSV save failed: {e}")
-        logger.error(f"❌ Error details: {traceback.format_exc()}")
         return False
 
 def update_order_in_csv(order_id, field, new_value):
@@ -288,8 +319,7 @@ def update_order_in_csv(order_id, field, new_value):
             orders = list(reader)
         
         # Find and update the order
-        field_index = None
-        for i, order in enumerate(orders):
+        for order in orders:
             if order['Order ID'] == order_id:
                 if field == 'Status':
                     order['Status'] = new_value
@@ -340,7 +370,6 @@ def send_admin_order_notification(order_id, order_data):
 
 Choose action:"""
     
-    # Inline keyboard for admin actions
     inline_keyboard = [
         [
             {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
@@ -387,7 +416,6 @@ def handle_admin_callback(chat_id, callback_data):
                 
         elif callback_data.startswith('cancel_'):
             order_id = callback_data[7:]
-            # Ask for cancellation reason
             user_sessions[chat_id] = {
                 'step': 'awaiting_cancel_reason',
                 'order_id': order_id
@@ -479,7 +507,6 @@ def handle_admin_price_update(chat_id, item_name):
     if not is_admin(chat_id):
         return
     
-    # Find item in categories
     item_found = False
     for category, items in grocery_categories.items():
         if item_name in items:
@@ -510,7 +537,6 @@ def handle_admin_new_item(chat_id):
     
     user_sessions[chat_id] = {'step': 'awaiting_new_item_category'}
     
-    # Show categories for new item
     categories_text = "📋 Select category for new item:"
     inline_keyboard = []
     
@@ -581,7 +607,7 @@ def show_all_orders_admin(chat_id):
     send_message(chat_id, orders_text)
     show_admin_panel(chat_id)
 
-# ==================== ENHANCED MESSAGE HANDLING ====================
+# ==================== MESSAGE HANDLING ====================
 def send_message(chat_id, text, keyboard=None, inline_keyboard=None, parse_mode='HTML'):
     """Enhanced message sending with comprehensive error handling"""
     if not TELEGRAM_TOKEN:
@@ -643,7 +669,7 @@ def send_document(chat_id, document_data, filename):
         logger.error(f"❌ Error sending document: {e}")
         return False
 
-# ==================== ENHANCED ORDER SUMMARY ====================
+# ==================== ORDER SUMMARY ====================
 def create_enhanced_order_summary(customer_name, phone, address, cart, special_instructions=""):
     """Create a beautifully formatted order summary"""
     
@@ -683,16 +709,13 @@ Delivery Fee: ${delivery_fee:.2f}
 def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, special_instructions):
     """Process cash on delivery order"""
     try:
-        # Create enhanced order summary
         order_summary, total = create_enhanced_order_summary(
             customer_name, phone, address, cart, special_instructions
         )
         
-        # Generate order ID and save to tracking
         order_id = generate_order_id()
         save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, total, "Pending")
         
-        # Save to CSV
         csv_success = save_order_to_csv(
             chat_id, customer_name, phone, address, cart, 
             special_instructions, order_id
@@ -701,7 +724,6 @@ def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, speci
         if not csv_success:
             logger.warning("⚠️ Order saved locally but CSV save failed")
         
-        # Send confirmation to customer
         confirmation = f"""✅ Order Confirmed! 🎉
 
 Thank you {customer_name}!
@@ -718,14 +740,12 @@ We're preparing your fresh groceries! 🥦"""
         
         send_message(chat_id, confirmation)
         
-        # Notify admin with action buttons
         try:
             order_data = order_tracking[order_id]
             send_admin_order_notification(order_id, order_data)
         except Exception as e:
             logger.warning(f"⚠️ Admin notification failed: {e}")
         
-        # Clear cart and session
         if chat_id in user_carts:
             user_carts[chat_id] = {}
         user_sessions[chat_id] = {'step': 'main_menu'}
@@ -735,7 +755,6 @@ We're preparing your fresh groceries! 🥦"""
             
     except Exception as e:
         logger.error(f"❌ Critical error in COD order: {e}")
-        logger.error(f"❌ Error details: {traceback.format_exc()}")
         send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again.")
         return False
 
@@ -888,8 +907,6 @@ def handle_callback_query(chat_id, callback_data):
         show_cart(chat_id)
     elif callback_data.startswith(('ship_', 'cancel_', 'deliver_', 'details_')):
         handle_admin_callback(chat_id, callback_data)
-    
-    # === ADMIN CALLBACKS ===
     elif callback_data.startswith('update_price_'):
         item_name = callback_data[13:]
         handle_admin_price_update(chat_id, item_name)
@@ -950,7 +967,6 @@ def handle_message(chat_id, text):
         elif text == '🛒 My Cart':
             show_cart(chat_id)
         elif text == '📦 Track Order':
-            # Show user's recent orders
             user_orders = []
             for order_id, order in order_tracking.items():
                 if order['chat_id'] == chat_id:
@@ -958,7 +974,7 @@ def handle_message(chat_id, text):
             
             if user_orders:
                 track_text = "📦 Your Orders:\n\n"
-                for order_id, order in user_orders[-5:]:  # Show last 5 orders
+                for order_id, order in user_orders[-5:]:
                     status_emoji = {
                         'Pending': '⏳',
                         'Shipped': '🚚', 
@@ -988,8 +1004,6 @@ def handle_message(chat_id, text):
             handle_checkout(chat_id)
         elif text in grocery_categories:
             show_category_items(chat_id, text)
-        
-        # === ADMIN COMMANDS ===
         elif text == '/admin' or text == '👨‍💼 Admin Panel':
             show_admin_panel(chat_id)
         elif text == '📊 View All Items' and is_admin(chat_id):
@@ -1006,8 +1020,6 @@ def handle_message(chat_id, text):
             load_prices_from_csv()
             send_message(chat_id, "✅ Menu refreshed with latest prices!")
             show_admin_panel(chat_id)
-        
-        # === ORDER SESSION HANDLING ===
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_name':
             customer_name = text
             user_sessions[chat_id] = {'step': 'awaiting_phone', 'customer_name': customer_name}
@@ -1026,8 +1038,6 @@ def handle_message(chat_id, text):
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_instructions':
             special_instructions = text if text.lower() != 'none' else ""
             session_data = user_sessions[chat_id]
-            
-            # Process cash on delivery order
             process_cash_on_delivery(
                 chat_id,
                 session_data['customer_name'],
@@ -1036,10 +1046,7 @@ def handle_message(chat_id, text):
                 user_carts[chat_id],
                 special_instructions
             )
-        
-        # === ADMIN SESSION HANDLING ===
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_cancel_reason':
-            # Admin providing cancellation reason
             order_id = user_sessions[chat_id].get('order_id')
             if order_id and update_order_status(order_id, 'Cancelled', text):
                 send_message(chat_id, f"✅ Order #{order_id} cancelled! Customer notified with your reason.")
@@ -1052,20 +1059,14 @@ def handle_message(chat_id, text):
                 session_data = user_sessions[chat_id]
                 item_name = session_data['editing_item']
                 category = session_data['item_category']
-                
-                # Update price
                 grocery_categories[category][item_name]['price'] = new_price
-                
-                # Save to CSV
                 save_prices_to_csv()
-                
                 send_message(chat_id, 
                     f"✅ Price updated!\n\n"
                     f"📦 {item_name}\n"
                     f"💰 New Price: ${new_price}/{grocery_categories[category][item_name]['unit']}"
                 )
                 show_admin_panel(chat_id)
-                
             except ValueError:
                 send_message(chat_id, "❌ Please enter a valid number (e.g., 12.99)")
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_name':
@@ -1081,20 +1082,17 @@ def handle_message(chat_id, text):
                 session_data = user_sessions[chat_id]
                 item_name = session_data['new_item_name']
                 category = session_data['new_item_category']
-                
                 user_sessions[chat_id] = {
                     'step': 'awaiting_new_item_unit',
                     'new_item_name': item_name,
                     'new_item_price': item_price,
                     'new_item_category': category
                 }
-                
                 send_message(chat_id, 
                     f"📦 Item: {item_name}\n"
                     f"💰 Price: ${item_price}\n\n"
                     f"Please enter the unit (e.g., kg, liter, pack, dozen):"
                 )
-                
             except ValueError:
                 send_message(chat_id, "❌ Please enter a valid price number")
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_new_item_unit':
@@ -1103,19 +1101,13 @@ def handle_message(chat_id, text):
             item_name = session_data['new_item_name']
             item_price = session_data['new_item_price']
             category = session_data['new_item_category']
-            
-            # Add new item to category
             if category not in grocery_categories:
                 grocery_categories[category] = {}
-                
             grocery_categories[category][item_name] = {
                 'price': item_price,
                 'unit': unit
             }
-            
-            # Save to CSV
             save_prices_to_csv()
-            
             send_message(chat_id,
                 f"✅ New Item Added!\n\n"
                 f"📦 {item_name}\n"
@@ -1123,7 +1115,6 @@ def handle_message(chat_id, text):
                 f"📋 Category: {category}"
             )
             show_admin_panel(chat_id)
-        
         elif text == '📞 Contact Store':
             send_message(chat_id, "📞 FreshMart Contact Info:\n\n🏪 Store: FreshMart Grocery\n📞 Phone: 555-1234\n📍 Address: 123 Main Street\n⏰ Hours: 7 AM - 10 PM Daily")
         elif text == 'ℹ️ Store Info':
@@ -1141,7 +1132,6 @@ def handle_message(chat_id, text):
 📥 Admin can download data anytime"""
             send_message(chat_id, store_info)
         else:
-            # Handle any other text by showing main menu
             handle_start(chat_id)
 
     except Exception as e:
@@ -1164,7 +1154,6 @@ def get_updates(offset=None):
         if response.status_code == 200:
             data = response.json()
             if data.get('ok') and data.get('result'):
-                # Update the last_update_id to the highest update_id received
                 updates = data['result']
                 if updates:
                     last_update_id = max(update['update_id'] for update in updates)
@@ -1172,8 +1161,7 @@ def get_updates(offset=None):
             return None
         else:
             if response.status_code == 409:
-                logger.error("❌ Telegram API Error 409: Another bot instance is running with the same token!")
-                logger.error("💡 Solution: Stop any other running instances of this bot")
+                logger.error("❌ Telegram API Error 409: Another bot instance is running!")
             else:
                 logger.error(f"Telegram API error: {response.status_code}")
             return None
@@ -1182,19 +1170,24 @@ def get_updates(offset=None):
         return None
 
 def main():
-    # Check environment variables first
     if not TELEGRAM_TOKEN:
         logger.error("❌ CRITICAL: TELEGRAM_TOKEN environment variable not set!")
-        logger.error("💡 Set it in Railway → Variables tab")
         exit(1)
 
-    # Log connection status
-    logger.info("🛒 FreshMart Grocery Bot Started Successfully!")
+    # Start health check server in a separate thread
+    try:
+        health_thread = threading.Thread(target=start_health_check_server, daemon=True)
+        health_thread.start()
+        logger.info(f"🩺 Health check server started on port {PORT}")
+    except Exception as e:
+        logger.warning(f"⚠️ Health check server failed: {e}")
+
+    logger.info("🚀 FreshMart Grocery Bot Started on Railway!")
     logger.info("📊 Features: Order Tracking, Admin Controls, Real-time Updates")
     logger.info("💰 Payment: Cash on Delivery Only")
-    logger.info("💾 Data Storage: CSV Files (orders.csv, prices.csv)")
+    logger.info("💾 Data Storage: CSV Files")
     logger.info("📥 Admin Features: Price Management, Inventory Control, Data Download")
-    logger.info("📱 Ready to take orders with professional order tracking!")
+    logger.info("📱 Ready to take orders!")
 
     while True:
         try:
