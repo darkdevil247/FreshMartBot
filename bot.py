@@ -897,6 +897,41 @@ def handle_checkout(chat_id):
     send_message(chat_id, "🚚 Let's get your order delivered!\n\nPlease provide your full name:")
     user_sessions[chat_id] = {'step': 'awaiting_name'}
 
+# ==================== FIXED GET_UPDATES FUNCTION ====================
+def get_updates(offset=None):
+    """Get updates from Telegram with proper error handling and connection recovery"""
+    global last_update_id
+    
+    if not TELEGRAM_TOKEN:
+        return None
+        
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    params = {'timeout': 30, 'offset': offset or last_update_id + 1}
+        
+    try:
+        response = requests.get(url, params=params, timeout=35)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok') and data.get('result'):
+                updates = data['result']
+                if updates:
+                    last_update_id = max(update['update_id'] for update in updates)
+                return data
+            return None
+        elif response.status_code == 409:
+            logger.error("❌ Another bot instance is running! This instance will pause for 30 seconds.")
+            logger.info("💡 Solution: Stop other instances or wait for Railway to stabilize")
+            time.sleep(30)  # Wait 30 seconds before retrying
+            return None
+        else:
+            logger.error(f"Telegram API error: {response.status_code}")
+            time.sleep(5)  # Shorter wait for other errors
+            return None
+    except Exception as e:
+        logger.error(f"get_updates error: {e}")
+        time.sleep(5)
+        return None
+
 def handle_callback_query(chat_id, callback_data):
     if callback_data.startswith('add_'):
         item_name = callback_data[4:]
@@ -1139,36 +1174,7 @@ def handle_message(chat_id, text):
         send_message(chat_id, "❌ Sorry, an error occurred. Please try again.")
         handle_start(chat_id)
 
-def get_updates(offset=None):
-    """Get updates from Telegram with proper error handling"""
-    global last_update_id
-    
-    if not TELEGRAM_TOKEN:
-        return None
-        
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    params = {'timeout': 30, 'offset': offset or last_update_id + 1}
-        
-    try:
-        response = requests.get(url, params=params, timeout=35)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok') and data.get('result'):
-                updates = data['result']
-                if updates:
-                    last_update_id = max(update['update_id'] for update in updates)
-                return data
-            return None
-        else:
-            if response.status_code == 409:
-                logger.error("❌ Telegram API Error 409: Another bot instance is running!")
-            else:
-                logger.error(f"Telegram API error: {response.status_code}")
-            return None
-    except Exception as e:
-        logger.error(f"get_updates error: {e}")
-        return None
-
+# ==================== MAIN FUNCTION WITH ERROR RECOVERY ====================
 def main():
     if not TELEGRAM_TOKEN:
         logger.error("❌ CRITICAL: TELEGRAM_TOKEN environment variable not set!")
@@ -1187,8 +1193,13 @@ def main():
     logger.info("💰 Payment: Cash on Delivery Only")
     logger.info("💾 Data Storage: CSV Files")
     logger.info("📥 Admin Features: Price Management, Inventory Control, Data Download")
+    logger.info("🔄 Error Recovery: Auto-handles Telegram API conflicts")
     logger.info("📱 Ready to take orders!")
 
+    # Main loop with error recovery
+    error_count = 0
+    max_errors = 10
+    
     while True:
         try:
             updates = get_updates()
@@ -1207,11 +1218,20 @@ def main():
                         callback_data = callback['data']
                         logger.info(f"🔘 Callback from {chat_id}: {callback_data}")
                         handle_callback_query(chat_id, callback_data)
-
-            time.sleep(1)
-            
+                
+                error_count = 0  # Reset error count on successful update
+            else:
+                time.sleep(1)
+                
         except Exception as e:
-            logger.error(f"❌ Main loop error: {e}")
+            error_count += 1
+            logger.error(f"❌ Main loop error #{error_count}: {e}")
+            
+            if error_count > max_errors:
+                logger.error("🔄 Too many consecutive errors, waiting 60 seconds before continuing...")
+                time.sleep(60)
+                error_count = 0
+                
             time.sleep(5)
 
 if __name__ == '__main__':
